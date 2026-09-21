@@ -1,0 +1,369 @@
+Lint Harness – Pre-Commit Quality Gate 
+
+Technical Architecture and Design Documentation 
+
+ 
+
+1. Purpose 
+
+The Pre-Commit Lint Harness is a quality gate that runs before a commit is finalized. Its primary purpose is to prevent low-quality or policy-violating code from entering the shared repository while maintaining a fast developer feedback loop. 
+
+The harness is designed around four key outcomes: 
+
+Block commits that fail to define quality checks. 
+
+Skip unnecessary validation when the changes cannot impact the guarded quality dimensions. 
+
+Provide actionable failure context instead of exposing only raw command output. 
+
+Support a guided fix-and-retry workflow with explicit human approval. 
+
+2. Prerequisites 
+
+The following prerequisites must be available before setting up or executing the Pre-Commit Lint Harness. 
+
+Note: This workflow is currently designed to work with GitHub Copilot inside VS Code only. 
+
+2.1 Core Prerequisites 
+
+1. Git Repository 
+
+The project must be hosted in a Git repository. The lint harness uses Git to identify files that may be affected by the current commit. 
+
+git diff --name-only --diff-filter=ACMR HEAD — detects changed files, including staged and unstaged changes. 
+
+git ls-files --others --exclude-standard — detects untracked files. 
+
+2. Node.js & npm 
+
+Node.js and npm must be installed and available in the system PATH. They are required to execute the project's lint commands. 
+
+npm run affected:lint:ci — the main lint command used by the harness. 
+
+3. Nx Monorepo Tools 
+
+The project must use Nx where affected-project detection is required. Nx is used to identify impacted projects and execute the appropriate lint targets. 
+
+npx nx show projects --affected --withTarget=lint --json — detects affected projects that have a lint target. 
+
+npm run affected:lint:ci — runs the configured lint target for affected projects. 
+
+4. Lint Configuration 
+
+Linting must be configured for the applications and libraries protected by the harness. 
+
+ESLint and/or Stylelint must be configured in the relevant libraries and applications. 
+
+A lint target must be defined in the corresponding project.json files. 
+
+3. High-Level Architecture 
+
+The harness follows a staged pipeline architecture. Each stage has a clearly defined responsibility, allowing individual components to evolve independently without affecting the overall workflow. 
+
+Pipeline: 
+
+Trigger → Orchestration → Decision/Guards → Validation → Failure Intelligence → Remediation Handoff → Commit Retry 
+
+Developer Commit 
+      │ 
+      ▼ 
+┌──────────────────┐ 
+│  Trigger Layer   │ 
+└────────┬─────────┘ 
+         ▼ 
+┌──────────────────────┐ 
+│ Orchestration Layer  │ 
+└────────┬─────────────┘ 
+         ▼ 
+┌─────────────────────────┐ 
+│ Decision Layer (Guards) │ 
+└────────┬────────────────┘ 
+    ┌────┴────┐ 
+  Skip       Run 
+    │         │ 
+    │         ▼ 
+    │   ┌──────────────────┐ 
+    │   │ Validation Layer │ 
+    │   └────────┬─────────┘ 
+    │       ┌────┴────┐ 
+    │     Pass       Fail 
+    │       │         │ 
+    │       │         ▼ 
+    │       │   ┌──────────────────────┐ 
+    │       │   │ Failure Intelligence │ 
+    │       │   └──────────┬───────────┘ 
+    │       │              ▼ 
+    │       │   ┌──────────────────────┐ 
+    │       │   │ Remediation Handoff  │ 
+    │       │   └──────────┬───────────┘ 
+    │       │              ▼ 
+    │       │        Human Decision 
+    │       │         │         │ 
+    │       │       Accept     Rework 
+    │       │         │ 
+    │       │         ▼ 
+    │       │   ┌──────────────────────┐ 
+    │       │   │ Commit Retry Layer   │ 
+    │       │   └──────────┬───────────┘ 
+    └───────┴──────────────┘ 
+                   ▼ 
+             Commit Allowed 
+
+4. Core Components 
+
+4.1 Trigger Layer 
+
+The Trigger Layer receives the commit event and starts the harness lifecycle. 
+
+Responsibilities: 
+
+Start pre-commit execution. 
+
+Pass control to the Orchestration Layer. 
+
+Enforce synchronous completion before the commit is finalized. 
+
+Return the final harness status to Git. 
+
+4.2 Orchestration Layer 
+
+The Orchestration Layer coordinates execution across all stages of the harness. 
+
+Responsibilities: 
+
+Define and enforce the execution order. 
+
+Capture command output and exit status. 
+
+Normalize success and failure behavior. 
+
+Handle transitions between stages. 
+
+Guarantee deterministic exit states. 
+
+4.3 Decision Layer — Guards 
+
+The Decision Layer determines whether validation is required for the current commit. Its purpose is to reduce unnecessary validation cost while maintaining confidence in the quality gate. 
+
+Responsibilities: 
+
+Inspect staged changes. 
+
+Identify modified file types and project areas. 
+
+Determine whether quality-relevant scopes are impacted. 
+
+Skip validation when the changes cannot affect guarded quality dimensions. 
+
+Route relevant changes to the Validation Layer. 
+
+4.4 Validation Layer 
+
+The Validation Layer executes the quality checks defined by project policy. 
+
+Responsibilities: 
+
+Execute lint and other configured quality commands. 
+
+Stream relevant feedback to the developer. 
+
+Capture command output. 
+
+Return machine-consumable pass/fail results. 
+
+Preserve original validation evidence for downstream processing. 
+
+4.5 Failure Intelligence Layer 
+
+Raw lint output can contain a significant amount of noise. The Failure Intelligence Layer converts this output into concise, actionable failure context. 
+
+Responsibilities: 
+
+Extract error-focused information from command output. 
+
+Separate actionable errors from informational or irrelevant logs. 
+
+Persist the latest failure artifact. 
+
+Maintain historical failure artifacts where required. 
+
+Build structured remediation context. 
+
+Provide a consistent representation of the failure to developers and automation. 
+
+4.6 Remediation Handoff Layer 
+
+The Remediation Handoff Layer initiates the guided fix workflow after validation failure. 
+
+Responsibilities: 
+
+Open a remediation context using the captured failure evidence. 
+
+Provide relevant errors and surrounding context. 
+
+Initiate automated or assisted remediation where applicable. 
+
+Present an explicit decision point to the developer. 
+
+Prevent silent progression without human approval. 
+
+4.7 Commit Retry Layer 
+
+Once remediation has been accepted, the Commit Retry Layer resumes the commit workflow. 
+
+Responsibilities: 
+
+Stage corrected changes. 
+
+Re-attempt the commit. 
+
+Re-run the harness through the normal commit lifecycle. 
+
+Ensure the final repository state passes the same quality gate. 
+
+Design Principle: 
+
+Prefer safe skipping only when there is high confidence that the guarded quality outcomes cannot be affected. 
+
+For example, a commit containing only documentation changes may not require execution of a TypeScript or Javascript linting process. 
+
+Validation behavior: 
+
+Pass 
+  ↓ 
+Validation Successful 
+  ↓ 
+Commit continues 
+ 
+Fail 
+  ↓ 
+Validation Failed 
+  ↓ 
+Commit is blocked 
+  ↓ 
+Failure processing begins 
+
+Failure context may include: 
+
+Failure Summary 
+├── Validation Type 
+├── Failed Rule 
+├── File 
+├── Line / Column 
+├── Error Message 
+├── Severity 
+└── Suggested Remediation Context 
+
+Remediation workflow: 
+
+Failure 
+   ↓ 
+Analyze 
+   ↓ 
+Propose / Apply Fix 
+   ↓ 
+Human Review 
+   ├── Accept 
+   └── Rework 
+
+Commit retry workflow: 
+
+Fix Accepted 
+     ↓ 
+Stage Changes 
+     ↓ 
+Retry Commit 
+     ↓ 
+Run Guards 
+     ↓ 
+Run Validation 
+     ↓ 
+Pass → Commit 
+Fail → Remediation 
+
+5. Key Architectural Concepts 
+
+5.1 Deterministic Gating 
+
+The harness follows a clear pass/fail model. There are no ambiguous intermediate states where the harness silently allows a commit despite an unresolved quality failure. 
+
+Meets Policy → Continue Commit 
+Fails Policy → Block Commit 
+
+5.2 Progressive Cost Control 
+
+Validation is performed progressively based on risk. Low-cost guard checks execute first, while expensive validation is performed only when the changed content can affect the guarded quality dimensions. 
+
+Cheap Checks → Guard Evaluation → Expensive Validation → Failure Analysis / Remediation 
+
+5.3 Context Compression 
+
+The harness converts potentially large and noisy validation logs into high-signal failure artifacts. This reduces diagnosis time and provides automation with predictable input. 
+
+Raw Output → Parse → Filter → Structure → Actionable Failure Context 
+
+5.4 Human-Governed Automation 
+
+Automation can analyze failures and assist with remediation, but it does not have unrestricted authority to progress the workflow. Remediation requires explicit human approval. 
+
+Harness detects issue → Automation analyzes → Fix proposed/applied → Human reviews → Human approves → Retry 
+
+5.5 Replayable Recovery 
+
+Remediation does not bypass the quality gate. After a fix is accepted, the harness re-enters the normal commit path and validates the final content again. 
+
+Fix Accepted → Stage Changes → Retry Commit → Run Guards → Run Validation → Pass / Remediation 
+
+6. Design Principles 
+
+Fail closed — unresolved quality failures block the commit. 
+
+Validate only when necessary — use reliable guards to avoid redundant work. 
+
+Make failures actionable — provide structured context instead of raw logs. 
+
+Keep stages loosely coupled — each layer should have a focused responsibility. 
+
+Keep humans in control — remediation requires explicit approval. 
+
+Never bypass validation after remediation — accepted fixes must pass the normal gate. 
+
+Prefer deterministic behavior — identical inputs should produce predictable outcomes. 
+
+Optimize the feedback loop — minimize unnecessary execution and investigation time. 
+
+7. How to set up 
+
+7.1 Setup harness code 
+
+Download the ZIP file (Lint Harness) and extract the content inside the root folder of your nx-based project.  
+
+7.2 Setup hooks 
+
+Open terminal and execute following command: 
+    git config core.hooksPath .githooks  
+
+To verify if the hooks are ready to be used, execute following command: 
+
+    git config --get core.hooksPath 
+
+Terminal out should display: 
+    .githooks 
+
+7.1 Run the harness 
+
+Generate a change in your codebase. 
+
+Stage the changes and start a commit to remote branch. 
+
+Observe the harness being executed as part of pre-commit hook. 
+
+If failures are detected, a Copilot chat session will start and will resolve all the detected issues. 
+
+8. Overall Outcome 
+
+The Pre-Commit Lint Harness establishes a controlled quality pipeline between developer changes and repository history. 
+
+Intelligent Change Detection + Deterministic Validation + Structured Failure Analysis + Guided Remediation + Human Approval + End-to-End Retry 
+
+This approach allows the harness to enforce coding standards consistently while minimizing developer friction and creating a foundation that can be extended beyond linting to additional quality and policy checks. 
