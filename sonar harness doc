@@ -1,0 +1,174 @@
+Sonar Harness
+Local Pre-Commit Quality Gate with Copilot-Driven Remediation
+1. Purpose
+The Sonar Harness is a local, pre-commit quality gate that detects new SonarAnalyzer.CSharp violations and uses GitHub Copilot Agent to assist with automated remediation.
+It shifts Sonar validation from a post-commit or CI activity to the developer's local workflow. The harness detects issues, enriches them with SonarQube rule information when available, assists with remediation, requires developer approval, and validates the changes again before the commit is allowed to proceed.
+Core workflow:
+Detect → Explain → Remediate → Approve → Revalidate → Commit
+2. Prerequisites[AD1.1][HS1.2]
+Note: This workflow is currently designed to work with GitHub Copilot only. 
+2.1 Git Hooks
+The repository uses Git's native hooks mechanism rather than Husky or npm-based hooks.
+git config core.hooksPath .githooks
+The pre-commit workflow is triggered from:
+.githooks/pre-commit
+2.2 PowerShell
+Either of the following must be available on PATH:
+•	pwsh — PowerShell 7+
+•	powershell.exe — Windows PowerShell
+If neither executable is available, the pre-commit hook blocks the commit.
+2.3 .NET SDK
+A .NET SDK compatible with the projects under src/ is required.
+dotnet build
+2.4 VS Code CLI
+The VS Code CLI (code) is required only when automatic Copilot Agent remediation should be launched.
+code --version
+If unavailable, remediation can be generated without launching VS Code:
+pwsh -NoProfile -ExecutionPolicy Bypass -File tools/sonar-remediate.ps1 -NoLaunch
+2.5 Optional SonarQube Access
+SonarQube access is optional. It is used only to enrich analyzer violations with additional rule information.
+Variable	Required	Description
+SONAR_HOST_URL	Optional	Base URL of the SonarQube server
+SONAR_TOKEN	Optional	SonarQube user/analysis token
+SONAR_PROJECT_KEY	Optional	SonarQube project key; defaults to WizNG.Web
+
+If SonarQube variables are not configured, the enrichment step continues without SonarQube metadata. The local analyzer gate remains fully functional.
+3. High-Level Architecture
+git commit
+    │
+    ▼
+┌────────────────────────┐
+│  .githooks/pre-commit  │
+└───────────┬────────────┘
+            ├──────────────────────────────┐
+            ▼                              ▼
+┌──────────────────────────┐    ┌──────────────────────┐
+│  sonar-precommit.ps1     │    │  sonar-enrich.ps1    │
+└────────────┬─────────────┘    └──────────┬───────────┘
+       ┌─────┴─────┐                       ▼
+     No staged    Blocking          ┌──────────────────────┐
+     .cs files /  issues found ────►│ sonar-failure.json   │
+     no issues                      └──────────┬───────────┘
+       │                                       │
+       ▼                                       │
+┌────────────────────┐                         │
+│ Commit proceeds    │                         │
+└────────────────────┘                         │   
+                                               ▼
+                                    ┌──────────────────────┐
+                                    │ sonar-remediate.ps1  │
+                                    └──────────┬───────────┘
+                                               ▼
+                                    ┌──────────────────────────────┐
+                                    │ Copilot Agent session        │
+                                    │ (reads sonar-failure.json)   │
+                                    └──────────────┬───────────────┘
+                                    ┌──────────────┴────────────────┐
+                                    │                               │
+                         ACCEPT_AND_PROCEED                    REJECT_AND_RETRY
+                                    │                                 │
+                                    ▼                                 │
+                         ┌──────────────────────────────┐             │
+                         │ sonar-remediation-proceed.ps1│             │
+                         └──────────────┬───────────────┘             │
+                                        ▼                             │
+                               ┌──────────────────┐                   │
+                               │ git add -A       │                   │
+                               └────────┬─────────┘                   │
+                                        ▼                             │
+                               ┌──────────────────────┐               └──► Copilot Agent session
+                               │ git commit (restart) │                   
+                               └────────┬─────────────┘                                          
+                                        └──────────► .githooks/pre-commit
+                                                                      
+
+
+4. End-to-End Workflow
+Step 1 — Developer Creates a Commit
+The developer runs git commit, which invokes .githooks/pre-commit.
+Step 2 — Detect Staged C# Changes
+The harness identifies only staged C# files. If there are no staged .cs files, the Sonar validation is skipped.
+Step 3 — Identify Affected Projects
+For each staged C# file, the harness determines the owning .csproj and limits analysis to affected projects.
+Step 4 — Run Roslyn/Sonar Analysis
+Each affected project is built with analyzers enabled and SARIF output generated.
+-p:RunAnalyzers=true -p:ErrorLog=<sarif-file>
+Step 5 — Merge and Filter SARIF Results
+Results are merged into .git/sonar-harness/merged.sarif. Blocking issues are Sonar S* rules at error severity affecting staged files.
+.git/sonar-harness/sonar-summary.json
+Step 6 — SonarQube Metadata Enrichment
+When blocking Sonar issues are detected, the harness queries SonarQube to enrich them with rule details such as the rule description, root cause, and recommended fix strategy. The enriched results are stored in sonar-failure.json.
+Step 6 — Copilot-Driven Remediation
+The harness passes the enriched Sonar issues to a VS Code Copilot Agent through a structured remediation prompt. The Agent analyzes the violations, applies appropriate fixes, validates the changes, and presents the proposed remediation to the developer.
+Step 6 —Human-in-the-Loop Approval
+The Agent cannot make changes without explicit developer approval:
+•	ACCEPT_AND_PROCEED — stages the changes and restarts git commit, triggering the Sonar gate again. 
+•	REJECT_AND_RETRY — allows the Agent to revise the remediation and try again. 
+ACCEPT → git add -A → git commit → Pre-commit validation
+REJECT → Copilot remediation retry
+9. Generated Artifacts
+All harness-generated artifacts are stored under:
+.git/sonar-harness/
+Generated artifacts remain outside normal repository history.
+10. Core Components
+Component	File	Responsibility
+Git Hook Entry Point	.githooks/pre-commit	Entry point for the commit workflow. Invokes analyzer, enrichment, and remediation components.
+Analyzer Gate	tools/sonar-precommit.ps1	Detects staged C# files, resolves affected projects, runs dotnet build with analyzers, generates SARIF, filters Sonar S* rules as errors, and determines whether the commit is blocked.
+Metadata Enrichment	tools/sonar-enrich.ps1	Queries SonarQube for rule information such as root cause and remediation guidance.
+Remediation Launcher	tools/sonar-remediate.ps1	Generates the Copilot remediation prompt, stores it in history, and optionally launches VS Code.
+Commit Restart Helper	tools/sonar-remediation-proceed.ps1	Stages Agent changes and restarts git commit so the pre-commit validation runs again.
+Analyzer Configuration	Directory.Build.props	Provides shared build/analyzer configuration used by affected .NET projects.
+11. Design Principles
+Fail Fast and Locally: Detect Sonar violations at commit time rather than after code reaches CI.
+Analyze Only What Changed: Scope validation to staged .cs files and their associated projects.
+Reuse Existing Analyzer Configuration: Use the existing SonarAnalyzer.CSharp configuration referenced by the .NET projects.
+Keep SonarQube Enrichment Optional: Use SonarQube for additional context without making it a hard dependency for the local gate.
+Human-in-the-Loop AI: Use Copilot as a remediation assistant while requiring explicit developer approval.
+Revalidate AI-Generated Changes: Restart git commit after remediation so the same pre-commit gate validates the changes.
+Keep Generated Artifacts Ephemeral: Store generated SARIF, metadata, and prompts under .git/sonar-harness/.
+Cross-Shell Compatibility: Use a POSIX sh hook that tries pwsh first and falls back to powershell.exe.
+12. How to set up
+Step 1 — Download the harness code
+Download the ZIP file (Sonar Harness) and extract the content inside the root folder of your C#/.Net project.
+Step 1 — Configure Git Hooks
+git config core.hooksPath .githooks
+git config --get core.hooksPath
+Expected output: .githooks
+Step 2 — Configure SonarQube Enrichment
+1.	Sonar Enrichment Configuration (Recommended)
+a.	Configure following User environment variables:
+i.	SONAR_HOST_URL 
+ii.	SONAR_TOKEN: <refer below>
+iii.	SONAR_PROJECT_KEY: <refer below>
+2.	How to get SONAR_TOKEN:
+a.	Sign in to your SonarQube server in the browser.
+b.	Open your profile or account settings.
+c.	Go to Security.
+d.	Create a new token.
+e.	Copy the token value immediately and store it securely.
+3.	How to get SONAR_PROJECT_KEY:
+a.	Sign in to SonarQube.
+b.	Open your project.
+c.	From the left navigation, go to Project Information.
+d.	Under About this Project, you will be able to find the Project Key.
+Step 3 — Verify .NET
+dotnet --version
+dotnet build
+Step 4 — Verify VS Code CLI
+code --version
+13. Verification
+1.	Make a C# change that violates a configured Sonar rule.
+2.	Stage the change using git add.
+3.	Attempt to commit using git commit.
+4.	Verify that the commit is blocked.
+5.	Check sonar-summary.json and sonar-failure.json under .git/sonar-harness/.
+6.	Verify that a VS Code Copilot Agent session is launched when automatic remediation is enabled.
+7.	Review the proposed changes.
+8.	Select ACCEPT_AND_PROCEED.
+9.	Verify that the commit is restarted.
+10.	Confirm that the pre-commit Sonar gate executes again.
+11.	Verify that the commit succeeds once all blocking violations are resolved.
+16. Summary
+The Sonar Harness turns Sonar analysis into a developer-local, pre-commit quality gate rather than relying exclusively on CI-based validation.
+Native Git Hooks + Roslyn/SonarAnalyzer.CSharp + SonarQube Rule Enrichment + GitHub Copilot Agent + Human Approval + Automatic Revalidation
+The resulting workflow is: Detect Sonar issues → Understand the issue → Generate a fix → Review the fix → Re-run Sonar analysis → Commit only when the gate passes.
